@@ -1,40 +1,90 @@
-require 'English'
-
 # Software patch-panel.
 class PatchPanel < Trema::Controller
-  def start(args)
-    config_file = args[0] || 'patch_panel.conf'
-    @patch = parse(IO.read(config_file))
-    logger.info "PatchPanel started (config = #{config_file})."
+  def start(_args)
+    @patch = Hash.new { [] }
+    @mirror = Hash.new { |h,k| h[k] = {} }
+    logger.info 'PatchPanel started.'
   end
 
-  def switch_ready(datapath_id)
-    @patch.each do |port_a, port_b|
-      make_patch datapath_id, port_a, port_b
+  def switch_ready(dpid)
+    @patch[dpid] = []
+    @patch[dpid].each do |port_a, port_b|
+      delete_flow_entries dpid, port_a, port_b
+      add_flow_entries dpid, port_a, port_b
     end
+  end
+
+  def create_patch(dpid, port_a, port_b)
+    add_flow_entries dpid, port_a, port_b
+    pair = port_a < port_b ? [port_a, port_b] : [port_b, port_a]
+    @patch[dpid] << pair
+   end
+
+  def delete_patch(dpid, port_a, port_b)
+    delete_flow_entries dpid, port_a, port_b
+    @patch[dpid] -= [port_a, port_b].sort
+  end
+
+  def add_mirror(dpid, port_a, port_b)
+    logger.info "#add_mirror"
+    add_mirror_entries dpid, port_a, port_b
+  end
+
+  def list()
+    str = ""
+
+    @patch.each do |dpid, pairs|
+      str += "#dpid = 0x#{dpid.to_s(16)}\n"
+      pairs.each do |pair|
+        str += "* #{pair[0]} <-> #{pair[1]}\n"
+      end
+      @mirror[dpid].each do |port_a, port_m|
+        str += "+ #{port_a} --> #{port_m}\n"
+      end
+      str += "\n"
+    end
+
+    str
   end
 
   private
 
-  def parse(config)
-    config.each_line.map { |each| parse_line(each) }
+  def add_flow_entries(dpid, port_a, port_b)
+    send_flow_mod_add(dpid,
+                      match: Match.new(in_port: port_a),
+                      actions: SendOutPort.new(port_b))
+    send_flow_mod_add(dpid,
+                      match: Match.new(in_port: port_b),
+                      actions: SendOutPort.new(port_a))
   end
 
-  def parse_line(line)
-    fail "Invalid format: '#{line}'" unless /^(\d+)\s+(\d+)$/=~ line
-    [$LAST_MATCH_INFO[1].to_i, $LAST_MATCH_INFO[2].to_i]
+  def delete_flow_entries(dpid, port_a, port_b)
+    send_flow_mod_delete(dpid, match: Match.new(in_port: port_a))
+    send_flow_mod_delete(dpid, match: Match.new(in_port: port_b))
   end
 
-  def make_patch(datapath_id, port_a, port_b)
-    send_flow_mod_add(
-      datapath_id,
-      match: Match.new(in_port: port_a),
-      actions: SendOutPort.new(port_b)
-    )
-    send_flow_mod_add(
-      datapath_id,
-      match: Match.new(in_port: port_b),
-      actions: SendOutPort.new(port_a)
-    )
+  def add_mirror_entries(dpid, port_a, port_m)
+    port_b = nil
+
+    @patch[dpid].each do |pair|
+      port_b = pair[1] if pair[0] == port_a
+      port_b = pair[0] if pair[1] == port_a
+    end
+
+    return if port_b.nil?
+
+    send_flow_mod_add(dpid,
+                      match: Match.new(in_port: port_a),
+                      actions: [
+                        SendOutPort.new(port_b),
+                        SendOutPort.new(port_m),
+                      ])
+    send_flow_mod_add(dpid,
+                      match: Match.new(in_port: port_b),
+                      actions: [
+                        SendOutPort.new(port_a),
+                        SendOutPort.new(port_m),
+                       ])
+    @mirror[dpid][port_a] = port_m
   end
 end
